@@ -28,6 +28,24 @@
 
 ![SonoSeal library table](images/sc2.png)
 
+## Install
+
+Download `SonoSeal-*-arm64.zip` from [Releases](https://github.com/pierowemyss/SonoSeal/releases), unzip it, and drag `SonoSeal.app` to `/Applications`. It needs macOS 26 on Apple Silicon.
+
+The app isn't notarized, so macOS blocks it the first time you open it. Go to **System Settings → Privacy & Security** and click **Open Anyway**, or run:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/SonoSeal.app
+```
+
+Installing [ffmpeg](https://ffmpeg.org) is recommended:
+
+```sh
+brew install ffmpeg
+```
+
+SonoSeal decodes with Core Audio and only falls back to ffmpeg for files macOS can't read, such as the variable-blocksize FLACs ffmpeg writes when transcoding. Without ffmpeg, those files show an error and aren't analyzed.
+
 ## Build
 
 Requires macOS 26 and Xcode 26 (or the matching Swift toolchain).
