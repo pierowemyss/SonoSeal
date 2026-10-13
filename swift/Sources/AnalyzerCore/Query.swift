@@ -13,7 +13,7 @@ public func fmtOf(_ r: TrackResult) -> String {
 }
 
 public func estKbps(_ r: TrackResult) -> Int? {
-    r.estQuality.firstMatch(of: /\d+/).map { Int($0.output)! } ?? r.claimedKbps
+    r.estQuality.split { !("0" ... "9").contains($0) }.first.flatMap { Int($0) } ?? r.claimedKbps  // not Regex: runs per row per filter
 }
 
 // query fields: name -> value from a result (nil = not measured -> condition fails)
@@ -52,7 +52,7 @@ public func parseQuery(_ text: String) -> Query {
             let v = Double(m.3).map(FieldValue.num) ?? .text(m.3.lowercased())
             q.conds.append(Condition(m.1.lowercased(), String(m.2), v))
         } else {
-            q.words.append(tok.lowercased())
+            q.words.append(searchKey(tok))
         }
     }
     return q
@@ -69,10 +69,22 @@ func compare(_ a: Double, _ op: String, _ b: Double) -> Bool {
     }
 }
 
-public func matches(_ r: TrackResult, _ q: Query) -> Bool {
+/// Path folded for word search (case + Unicode form: APFS names are often decomposed). Precompute it once per track.
+public func searchKey(_ s: String) -> String { s.lowercased().precomposedStringWithCanonicalMapping }
+
+/// Byte substring search on two folded strings; String.contains is ~10x slower and this runs per row per keystroke.
+func has(_ hay: String, _ needle: String) -> Bool {
+    var h = hay, n = needle
+    return h.withUTF8 { hb in n.withUTF8 { nb in memmem(hb.baseAddress, hb.count, nb.baseAddress, nb.count) != nil } }
+}
+
+/// `key`: searchKey(r.path), pass it precomputed when filtering many rows.
+public func matches(_ r: TrackResult, _ q: Query, key: String? = nil) -> Bool {
     // ponytail: AND only; split the query on '|' if OR is ever needed
-    let path = r.path.lowercased()
-    guard q.words.allSatisfy(path.contains) else { return false }
+    if !q.words.isEmpty {
+        let path = key ?? searchKey(r.path)
+        guard q.words.allSatisfy({ has(path, $0) }) else { return false }
+    }
     for c in q.conds {
         guard let v = FIELDS[c.field]?(r) else { return false }
         switch (c.value, v) {
@@ -86,6 +98,36 @@ public func matches(_ r: TrackResult, _ q: Query) -> Bool {
         }
     }
     return true
+}
+
+extension TrackResult {
+    public var name: String { (path as NSString).lastPathComponent }
+}
+
+/// Sorted copy for the table. Each key is computed once per row, not per comparison (20k rows: ms, not seconds).
+/// Unmeasured values sort first ascending.
+// ponytail: plain `<` on lowercased strings, no numeric-aware "2 < 10"; zero-padded track numbers are fine
+public func sortTracks(_ rs: [TrackResult], by key: String, ascending: Bool) -> [TrackResult] {
+    func by<K: Comparable>(_ f: (TrackResult) -> K) -> [TrackResult] {
+        let ks = rs.map(f)
+        return rs.indices.sorted { ascending ? ks[$0] < ks[$1] : ks[$1] < ks[$0] }.map { rs[$0] }
+    }
+    switch key {
+    case "name": return by { $0.name.lowercased() }
+    case "artist": return by { ($0.artist ?? "").lowercased() + "\0" + $0.path.lowercased() }  // path keeps albums together
+    case "verdict": return by { ["Fake", "Suspect", "?", "Error", "OK"].firstIndex(of: $0.verdict) ?? 5 }
+    case "conf": return by(\.confidence)
+    case "format": return by { fmtOf($0) }
+    case "kbps": return by { $0.claimedKbps ?? -1 }
+    case "cutoff": return by { $0.cutoffHz ?? -1 }
+    case "est": return by { estKbps($0) ?? 0 }
+    case "dr": return by { $0.dr ?? -1 }
+    case "peak": return by { $0.peakDb ?? -999 }
+    case "rms": return by { $0.rmsDb ?? -999 }
+    case "clips": return by { $0.clipEvents ?? -1 }
+    case "added": return by { $0.added ?? .distantPast }
+    default: return by { $0.path.lowercased() }
+    }
 }
 
 // range filters shown in the Filters sidebar: (field, label, decimals)

@@ -34,30 +34,15 @@ struct RangeState {
     }
 }
 
-extension TrackResult {  // non-optional sort keys for the Table
-    var name: String { URL(fileURLWithPath: path).lastPathComponent }
-    var verdictRank: Int { ["Fake", "Suspect", "?", "Error", "OK"].firstIndex(of: verdict) ?? 5 }
-    var sKbps: Int { claimedKbps ?? -1 }
-    var sCutoff: Double { cutoffHz ?? -1 }
-    var sEst: Int { estKbps(self) ?? 0 }
-    var sDr: Double { dr ?? -1 }
-    var sPeak: Double { peakDb ?? -999 }
-    var sRms: Double { rmsDb ?? -999 }
-    var sClips: Int { clipEvents ?? -1 }
-    var format: String { fmtOf(self) }
-    var sArtist: String { artist ?? "" }
-    var sAdded: Date { added ?? .distantPast }
-}
-
 enum SortChoice: String, CaseIterable, Identifiable {
     case added = "Recently Added", name = "Name", artist = "Artist", path = "Folder"
     var id: Self { self }
-    var order: [KeyPathComparator<TrackResult>] {
+    var order: (key: String, ascending: Bool) {  // sortTracks keys
         switch self {
-        case .added: [KeyPathComparator(\.sAdded, order: .reverse)]
-        case .name: [KeyPathComparator(\.name)]
-        case .artist: [KeyPathComparator(\.sArtist), KeyPathComparator(\.path)]  // path keeps albums together
-        case .path: [KeyPathComparator(\.path)]
+        case .added: ("added", false)
+        case .name: ("name", true)
+        case .artist: ("artist", true)
+        case .path: ("path", true)
         }
     }
 }
@@ -65,8 +50,9 @@ enum SortChoice: String, CaseIterable, Identifiable {
 @Observable @MainActor final class Model {
     var results: [TrackResult] = []
     var filtered: [TrackResult] = []
+    var generation = 0  // bumped per refilter; the table reloads on change (cheaper than comparing 20k rows)
     var selection: Set<String> = []
-    var sortOrder = [KeyPathComparator(\TrackResult.path)] { didSet { refilter() } }
+    var sort: (key: String, ascending: Bool) = ("path", true) { didSet { if sort != oldValue { resort() } } }
     var root: URL?  // the single opened folder, if there's exactly one
     var sources: [URL] = [] {  // what the current scan covers (folders, dropped items or playlist tracks)
         didSet { UserDefaults.standard.set(sources.filter(isDir).map(\.path), forKey: "folders") }
@@ -94,6 +80,10 @@ enum SortChoice: String, CaseIterable, Identifiable {
     private var scanTask: Task<Void, Never>?
     private var scanID = UUID()
     private var debounce: Task<Void, Never>?
+    // sorted once per sort/results change; typing and filters only filter it (order is kept)
+    @ObservationIgnored private var sorted: [TrackResult] = []
+    @ObservationIgnored private var sortedKeys: [String] = []
+    @ObservationIgnored private var searchKeys: [String: String] = [:]  // path -> searchKey(path), folded once per track
 
     init() {
         let d = UserDefaults.standard
@@ -122,7 +112,7 @@ enum SortChoice: String, CaseIterable, Identifiable {
 
     private func open(_ dirs: [URL]) {
         root = dirs.count == 1 ? dirs[0] : nil
-        if dirs.isEmpty { stop(); sources = []; results = []; selection = []; refreshCounts(); refilter() } else { scan(dirs) }
+        if dirs.isEmpty { stop(); sources = []; results = []; selection = []; refreshCounts(); resort() } else { scan(dirs) }
     }
 
     func importPlaylist() {
@@ -149,9 +139,9 @@ enum SortChoice: String, CaseIterable, Identifiable {
         stop()
         let gen = UUID(); scanID = gen  // a cancelled scan still drains its in-flight jobs; drop them, or rows duplicate
         sources = urls
-        results = []; selection = []; folder = ""
+        results = []; selection = []; searchKeys = [:]; folder = ""
         done = 0; total = 0; started = .now; scanning = true
-        refreshCounts(); refilter()
+        refreshCounts(); resort()
         let cache = cache
         scanTask = Task {
             let files = await Task.detached { audioFiles(urls) }.value
@@ -165,6 +155,8 @@ enum SortChoice: String, CaseIterable, Identifiable {
                 for await r in group {
                     if let r { pending.append(r) }
                     if let f = it.next(), !Task.isCancelled { group.addTask { await Self.job(f, cache) } }
+                    // ponytail: each flush re-sorts everything (~20 ms at 20k) and relayouts sidebar/status bar; fine at 20k.
+                    // If scans of much larger libraries hitch, raise this interval or merge-insert pending into `sorted`.
                     if Date.now.timeIntervalSince(last) > 0.25, scanID == gen {  // batch UI updates; cache hits arrive thousands/sec
                         flush(&pending); last = .now
                     }
@@ -184,7 +176,10 @@ enum SortChoice: String, CaseIterable, Identifiable {
         let v = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey, .addedToDirectoryDateKey, .creationDateKey])
         let mtime = v?.contentModificationDate?.timeIntervalSince1970 ?? 0, size = v?.fileSize ?? 0
         var r: TrackResult
-        if let c = await cache.get(url.path, mtime: mtime, size: size), c.version == VERSION {
+        if size == 0 {  // macOS Core Audio leaks an fd per failed open of an empty file; 20k of them hit the fd limit
+            r = .error(url.path, CocoaError(.fileReadCorruptFile))
+            r.artist = ""
+        } else if let c = await cache.get(url.path, mtime: mtime, size: size), c.version == VERSION {
             r = c
         } else {
             do {
@@ -202,10 +197,11 @@ enum SortChoice: String, CaseIterable, Identifiable {
 
     private func flush(_ pending: inout [TrackResult]) {
         results += pending
+        for r in pending { searchKeys[r.path] = searchKey(r.path) }
         done += pending.count
         pending = []
         refreshCounts()
-        refilter()
+        resort()
     }
 
     var eta: String {
@@ -265,13 +261,26 @@ enum SortChoice: String, CaseIterable, Identifiable {
         debounce = Task { try? await Task.sleep(for: .milliseconds(150)); if !Task.isCancelled { refilter() } }
     }
 
+    private func resort() {
+        sorted = sortTracks(results, by: sort.key, ascending: sort.ascending)
+        sortedKeys = sorted.map { searchKeys[$0.path] ?? searchKey($0.path) }
+        refilter()
+    }
+
     func refilter() {
         var q = parseQuery(search)
         q.conds += rangeConds
         let verdicts = view.verdicts
-        filtered = results.filter { r in
-            (verdicts?.contains(r.verdict) ?? true) && (folder == "" || sourceFolder(of: r) == folder) && matches(r, q)
-        }.sorted(using: sortOrder)
+        if q.isEmpty && verdicts == nil && folder == "" {
+            filtered = sorted  // nothing to filter (e.g. search just cleared): O(1) copy
+        } else {
+            filtered = sorted.indices.filter { i in
+                let r = sorted[i]
+                return (verdicts?.contains(r.verdict) ?? true) && (folder == "" || sourceFolder(of: r) == folder)
+                    && matches(r, q, key: sortedKeys[i])
+            }.map { sorted[$0] }
+        }
+        generation += 1
     }
 
     // MARK: actions (only ever on explicit user command)
@@ -321,7 +330,7 @@ enum SortChoice: String, CaseIterable, Identifiable {
         }
         results.removeAll { gone.contains($0.path) }
         selection.subtract(gone)
-        refreshCounts(); refilter()
+        refreshCounts(); resort()
         if !failed.isEmpty { alert("\(failed.count) file(s) couldn't be moved", failed.prefix(5).joined(separator: "\n")) }
     }
 

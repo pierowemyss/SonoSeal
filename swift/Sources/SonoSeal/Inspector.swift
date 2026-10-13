@@ -19,7 +19,7 @@ struct Inspector: View {
 
 struct Details: View {
     let r: TrackResult
-    @State private var spec: Result<Spectrogram, Error>?
+    @State private var spec: Result<(Spectrogram, CGImage?), Error>?
     var color: Color { COLORS[r.verdict] ?? .gray }
 
     var body: some View {
@@ -36,7 +36,8 @@ struct Details: View {
             try? await Task.sleep(for: .milliseconds(150))
             if Task.isCancelled { return }
             let url = URL(fileURLWithPath: r.path)
-            spec = await Task.detached(priority: .userInitiated) { Result { try spectrogram(url) } }.value
+            // image built off the main thread too: 1500 x 1024 pixels
+            spec = await Task.detached(priority: .userInitiated) { Result { let s = try spectrogram(url); return (s, s.image()) } }.value
         }
     }
 
@@ -63,7 +64,7 @@ struct Details: View {
             switch spec {
             case nil: ProgressView().frame(maxWidth: .infinity, minHeight: 220)
             case let .failure(e): Text("Spectrogram failed: \(e.localizedDescription)").foregroundStyle(.secondary)
-            case let .success(s): SpectrogramChart(s: s, cutoff: r.cutoffHz, color: color)
+            case let .success((s, image)): SpectrogramChart(s: s, image: image, cutoff: r.cutoffHz, color: color)
             }
             Text("dotted: 16 / 19 / 20 kHz · dashed: detected cutoff").font(.caption2).foregroundStyle(.secondary)
         }
@@ -147,10 +148,9 @@ struct SpectrumChart: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Average spectrum (full track)").font(.headline)
             Chart {
-                ForEach(spectrum.indices, id: \.self) { i in
-                    LineMark(x: .value("kHz", nyq * Double(i) / Double(n - 1)), y: .value("dB", spectrum[i]))
-                        .foregroundStyle(Color.accentColor).interpolationMethod(.linear)
-                }
+                let pts = spectrum.indices.map { SIMD2(nyq * Double($0) / Double(n - 1), Double(spectrum[$0])) }  // (kHz, dB)
+                LinePlot(pts, x: .value("kHz", \.x), y: .value("dB", \.y))
+                    .foregroundStyle(Color.accentColor)  // one vectorized mark, not 512 LineMarks
                 if let c = r.cutoffHz, c > 0 {
                     RuleMark(x: .value("cutoff", c / 1000))
                         .foregroundStyle(color).lineStyle(.init(lineWidth: 1.5, dash: [5, 3]))
@@ -172,8 +172,7 @@ struct SpectrumChart: View {
 }
 
 struct SpectrogramChart: View {
-    let s: Spectrogram, cutoff: Double?, color: Color
-    @State private var image: CGImage?
+    let s: Spectrogram, image: CGImage?, cutoff: Double?, color: Color
 
     var body: some View {
         let nyq = Double(s.sampleRate) / 2000
@@ -195,7 +194,6 @@ struct SpectrogramChart: View {
             }
         }
         .frame(height: 260)
-        .task { image = s.image() }
     }
 }
 

@@ -29,67 +29,22 @@ struct ContentView: View {
 
     // MARK: table
     var table: some View {
-        Table(of: TrackResult.self, selection: $model.selection, sortOrder: $model.sortOrder) {
-            Group {
-                TableColumn("Name", value: \TrackResult.name) { r in Text(r.name).help(r.reason) }
-                    .width(min: 120, ideal: 280)
-                TableColumn("Artist", value: \TrackResult.sArtist) { r in Text(r.sArtist) }.width(min: 60, ideal: 140)
-                TableColumn("Verdict", value: \TrackResult.verdictRank) { r in VerdictBadge(verdict: r.verdict) }
-                    .width(ideal: 76)
-                TableColumn("Conf %", value: \TrackResult.confidence) { r in Text("\(r.confidence)").monospacedDigit() }
-                    .width(ideal: 52)
-                TableColumn("Format", value: \TrackResult.format).width(ideal: 100)
-                TableColumn("kbps", value: \TrackResult.sKbps) { r in Text(r.claimedKbps.map(String.init) ?? "").monospacedDigit() }
-                    .width(ideal: 48)
-            }
-            Group {
-                TableColumn("Cutoff kHz", value: \TrackResult.sCutoff) { r in num(r.cutoffHz.map { $0 / 1000 }) }.width(ideal: 66)
-                TableColumn("Est. source", value: \TrackResult.sEst) { r in Text(r.estQuality) }.width(ideal: 80)
-                TableColumn("DR", value: \TrackResult.sDr) { r in num(r.dr, "%.0f") }.width(ideal: 34)
-                TableColumn("Peak", value: \TrackResult.sPeak) { r in num(r.peakDb) }.width(ideal: 44)
-                TableColumn("RMS", value: \TrackResult.sRms) { r in num(r.rmsDb) }.width(ideal: 44)
-                TableColumn("Clips", value: \TrackResult.sClips) { r in Text(r.clipEvents.map(String.init) ?? "").monospacedDigit() }
-                    .width(ideal: 44)
-                TableColumn("Added", value: \TrackResult.sAdded) { r in
-                    Text(r.added?.formatted(date: .abbreviated, time: .omitted) ?? "").monospacedDigit()
+        TrackTable(model: model)
+            .overlay {
+                if model.results.isEmpty && !model.scanning {
+                    ContentUnavailableView {
+                        Label("Drop music here", systemImage: "waveform.badge.magnifyingglass")
+                    } description: {
+                        Text("Drop a folder, an album or single tracks, or choose a folder to scan. "
+                             + "FLAC, WAV, AIFF, ALAC, MP3 and AAC are analyzed on this Mac — nothing is uploaded or modified.")
+                    } actions: {
+                        Button("Add Folder…") { model.chooseFolder() }.buttonStyle(.glassProminent)
+                    }
+                } else if model.filtered.isEmpty && !model.results.isEmpty {
+                    ContentUnavailableView.search(text: model.search)
                 }
-                .width(ideal: 86)
             }
-        } rows: {
-            ForEach(model.filtered) { TableRow($0) }
-        }
-        // fresh table per sort order: diffing a full reorder of thousands of rows freezes the app.
-        // ponytail: resets dragged column widths on re-sort; persist them via columnCustomization if that bugs anyone
-        .id(model.sortOrder)
-        .contextMenu(forSelectionType: String.self) { ids in
-            Button("Reveal in Finder", systemImage: "folder") { model.reveal(ids) }
-            Button("Copy Path", systemImage: "doc.on.doc") { model.copyPaths(ids) }
-            Divider()
-            Button("Apply Finder Tags", systemImage: "tag") { model.tag(ids) }
-            Button("Move to Trash", systemImage: "trash", role: .destructive) { model.trash(ids) }
-        } primaryAction: { _ in
-            model.showInspector = true
-        }
-        .onDeleteCommand { model.trash() }
-        .overlay {
-            if model.results.isEmpty && !model.scanning {
-                ContentUnavailableView {
-                    Label("Drop music here", systemImage: "waveform.badge.magnifyingglass")
-                } description: {
-                    Text("Drop a folder, an album or single tracks, or choose a folder to scan. "
-                         + "FLAC, WAV, AIFF, ALAC, MP3 and AAC are analyzed on this Mac — nothing is uploaded or modified.")
-                } actions: {
-                    Button("Add Folder…") { model.chooseFolder() }.buttonStyle(.glassProminent)
-                }
-            } else if model.filtered.isEmpty && !model.results.isEmpty {
-                ContentUnavailableView.search(text: model.search)
-            }
-        }
-        .safeAreaInset(edge: .bottom) { StatusBar(model: model) }
-    }
-
-    func num(_ v: Double?, _ f: String = "%.1f") -> Text {
-        Text(v.map { String(format: f, $0) } ?? "").monospacedDigit()
+            .safeAreaInset(edge: .bottom) { StatusBar(model: model) }
     }
 
     // MARK: toolbar
@@ -107,7 +62,7 @@ struct ContentView: View {
         ToolbarItem {
             Menu("Sort", systemImage: "arrow.up.arrow.down") {
                 ForEach(SortChoice.allCases) { c in
-                    Toggle(c.rawValue, isOn: Binding(get: { model.sortOrder == c.order }, set: { _ in model.sortOrder = c.order }))
+                    Toggle(c.rawValue, isOn: Binding(get: { model.sort == c.order }, set: { _ in model.sort = c.order }))
                 }
             }
             .help("Sort tracks (or click a column header)")
@@ -119,17 +74,6 @@ struct ContentView: View {
         ToolbarItem {
             Button("Inspector", systemImage: "sidebar.trailing") { model.showInspector.toggle() }
         }
-    }
-}
-
-struct VerdictBadge: View {
-    let verdict: String
-    var body: some View {
-        Text(verdict.uppercased())
-            .font(.caption2.weight(.bold))
-            .foregroundStyle(COLORS[verdict] ?? .gray)
-            .padding(.horizontal, 7).padding(.vertical, 2)
-            .background((COLORS[verdict] ?? .gray).opacity(0.16), in: .capsule)
     }
 }
 

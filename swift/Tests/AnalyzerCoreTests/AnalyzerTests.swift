@@ -139,3 +139,29 @@ func pythonParity() throws {
     let line = csv([TrackResult(path: "/a,b.flac", verdict: "OK", reason: "say \"hi\"")]).split(separator: "\n")[1]
     #expect(line.hasPrefix("\"/a,b.flac\",OK,0,") && line.hasSuffix("\"say \"\"hi\"\"\""))
 }
+
+@Test func sortAndFilter20k() {
+    var rs = (0 ..< 20000).map { i in
+        var r = TrackResult(path: "/m/Artist \(i % 200)/\(i % 2 == 0 ? "b" : "B") track \(19999 - i).flac", verdict: "OK", reason: "")
+        r.artist = i % 7 == 0 ? nil : "Artist \(i % 200)"
+        r.dr = i % 5 == 0 ? nil : Double(i % 20)
+        r.added = Date(timeIntervalSince1970: Double(i))
+        r.estQuality = i % 3 == 0 ? "~192 kbps" : "lossless"
+        return r
+    }
+    rs.shuffle()
+    let t = Date.now
+    let byName = sortTracks(rs, by: "name", ascending: true)
+    let keys = byName.map { searchKey($0.path) }
+    for k in 0 ..< 20 { let q = parseQuery("track \(k) est<256 dr>3"); _ = byName.indices.filter { matches(byName[$0], q, key: keys[$0]) } }
+    #expect(Date.now.timeIntervalSince(t) < 0.25)  // ~0.1 s; was ~5 s with per-comparison keys + localized compare
+
+    #expect(byName.map { $0.name.lowercased() } == byName.map { $0.name.lowercased() }.sorted())  // case-insensitive
+    #expect(sortTracks(rs, by: "name", ascending: false).map(\.path) == byName.reversed().map(\.path))
+    let art = sortTracks(rs, by: "artist", ascending: true)
+    #expect(art.prefix { $0.artist == nil }.count == rs.count { $0.artist == nil })  // untagged first
+    #expect(zip(art, art.dropFirst()).allSatisfy { a, b in a.artist != b.artist || a.path.lowercased() <= b.path.lowercased() })
+    #expect(sortTracks(rs, by: "added", ascending: false).first?.added == Date(timeIntervalSince1970: 19999))
+    #expect(sortTracks(rs, by: "dr", ascending: true).prefix { $0.dr == nil }.count == 4000)  // unmeasured first
+    #expect(matches(TrackResult(path: "/m/Cafe\u{301} Del Mar.flac", verdict: "OK", reason: ""), parseQuery("CAFÉ del")))  // NFD path
+}
