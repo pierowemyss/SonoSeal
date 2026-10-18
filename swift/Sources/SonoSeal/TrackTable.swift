@@ -15,6 +15,7 @@ import SwiftUI
     ("dr", "DR", 34, true, { fmtNum($0.dr, "%.0f") }),
     ("peak", "Peak", 44, true, { fmtNum($0.peakDb) }),
     ("rms", "RMS", 44, true, { fmtNum($0.rmsDb) }),
+    ("lufs", "LUFS", 44, true, { fmtNum($0.lufs) }),
     ("clips", "Clips", 44, true, { $0.clipEvents.map(String.init) ?? "" }),
     ("added", "Added", 86, true, { $0.added?.formatted(date: .abbreviated, time: .omitted) ?? "" }),
 ]

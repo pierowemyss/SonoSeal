@@ -24,6 +24,18 @@ func run(_ exe: String, _ args: [String]) throws -> Data {
 
 func ff(_ args: [String]) throws { try run(ffmpeg!, ["-v", "error", "-y"] + args) }
 
+/// ffmpeg's integrated loudness (LUFS), the reference for TrackResult.lufs. Its summary goes to stderr.
+func ebur128(_ u: URL) throws -> Double {
+    let p = Process(), err = Pipe()
+    p.executableURL = URL(filePath: ffmpeg!)
+    p.arguments = ["-nostats", "-i", u.path, "-af", "ebur128", "-f", "null", "-"]
+    p.standardError = err
+    try p.run()
+    let log = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    p.waitUntilExit()
+    return Double(log.components(separatedBy: "I:").last!.split(separator: " ").first!)!
+}
+
 func src(_ name: String, _ extra: [String] = []) throws -> URL {
     let out = D.appending(path: name)
     // pink noise: music-like spectrum that still reaches Nyquist
@@ -67,6 +79,12 @@ func check(_ u: URL, _ want: String, _ est: String? = nil) throws {
     #expect(abs(r.crestDb! - 3.01) < 0.05 && abs(r.rmsDb! - (r.peakDb! - 3.01)) < 0.05)
     #expect(r.correlation! > 0.999 && r.widthPct! < 0.1 && r.clipEvents == 0)
     #expect(abs(r.rolloffHz! - 1000) < 50 && r.bands!["Low mids"]! > 99)
+    #expect(abs(r.lufs! - r.peakDb!) < 0.1, "stereo 1 kHz sine: LUFS ~ peak, got \(r.lufs!)")  // K-weight ~0 dB at 1 kHz
+    let mono = D.appending(path: "mono.flac")
+    try ff(["-f", "lavfi", "-i", "sine=f=1000:d=20", mono.path])
+    let rm = try analyze(mono)
+    #expect(abs(rm.lufs! - (rm.peakDb! - 3.01)) < 0.1, "mono sine counted once, got \(rm.lufs!)")
+    #expect(try abs(analyze(wav).lufs! - ebur128(wav)) < 0.2)
     r = try analyze(enc(wav, "clipped.flac", "-af", "volume=30dB"))  // hard clips at full scale
     #expect(r.clipEvents! > 100)
     #expect(try analyze(wav).clipEvents == 0)
@@ -80,6 +98,7 @@ func check(_ u: URL, _ want: String, _ est: String? = nil) throws {
 @Test func sampleTracks() throws {
     for u in audioFiles([samples]) {
         try check(u, u.path.contains("/Fakes/") ? "Fake" : "OK")
+        if ffmpeg != nil { #expect(try abs(analyze(u).lufs! - ebur128(u)) < 0.2, "\(u.lastPathComponent) LUFS") }
     }
 }
 

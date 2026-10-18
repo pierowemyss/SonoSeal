@@ -80,7 +80,7 @@ struct Details: View {
             MetricSection("File", file)
             if let dr = r.dr, let peak = r.peakDb, let rms = r.rmsDb {
                 MetricSection("Level & dynamics", [
-                    ("Peak", f(peak, "dBFS")), ("RMS", f(rms, "dBFS")), ("Crest factor", f(r.crestDb, "dB")),
+                    ("Peak", f(peak, "dBFS")), ("RMS", f(rms, "dBFS")), ("Loudness", f(r.lufs, "LUFS")), ("Crest factor", f(r.crestDb, "dB")),
                     ("Noise floor", f(r.noiseFloorDb, "dBFS")), ("Dynamic range", "DR\(Int(dr.rounded())) · \(drNote(dr))")])
                 MetricSection("Clipping", [("Events", r.clipEvents.map { $0 == 0 ? "none" : "\($0)" } ?? ""),
                                      ("Samples", String(format: "%.3f %%", r.clipPct ?? 0))])

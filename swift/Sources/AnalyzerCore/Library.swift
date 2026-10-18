@@ -47,10 +47,10 @@ final class RekordboxReader: NSObject, XMLParserDelegate {
 public func csv(_ results: [TrackResult]) -> String {
     func field(_ s: String) -> String { s.contains(where: { ",\"\n".contains($0) }) ? "\"\(s.replacing("\"", with: "\"\""))\"" : s }
     func num(_ v: Double?, _ f: String = "%.1f") -> String { v.map { String(format: f, $0) } ?? "" }
-    let head = "path,verdict,confidence,format,kbps,cutoff_khz,est_source,dr,peak_db,rms_db,clips,reason"
+    let head = "path,verdict,confidence,format,kbps,cutoff_khz,est_source,dr,peak_db,rms_db,lufs,clips,reason"
     return ([head] + results.map { r in
         [r.path, r.verdict, "\(r.confidence)", fmtOf(r), r.claimedKbps.map(String.init) ?? "",
-         num(r.cutoffHz.map { $0 / 1000 }), r.estQuality, num(r.dr), num(r.peakDb), num(r.rmsDb),
+         num(r.cutoffHz.map { $0 / 1000 }), r.estQuality, num(r.dr), num(r.peakDb), num(r.rmsDb), num(r.lufs),
          r.clipEvents.map(String.init) ?? "", r.reason].map(field).joined(separator: ",")
     }).joined(separator: "\n") + "\n"
 }

@@ -2,7 +2,7 @@
 // Port of analyze.py. Strictly read-only: files are only ever opened for reading.
 import Accelerate
 
-public let VERSION = 3  // bump when results change shape/meaning -> cached rows get re-analyzed
+public let VERSION = 4  // bump when results change shape/meaning -> cached rows get re-analyzed
 public let AUDIO_EXTS: Set<String> = ["mp3", "m4a", "aac", "mp4", "aif", "aiff", "aifc", "wav", "flac"]
 
 // ponytail: heuristic thresholds, tuned on LAME/ffmpeg encodes + real house/techno masters; tune on false positives.
@@ -50,6 +50,7 @@ public struct TrackResult: Codable, Sendable, Hashable, Identifiable {
     public var bands: [String: Double]?
     public var peakDb: Double?
     public var rmsDb: Double?
+    public var lufs: Double?  // integrated loudness, ITU BS.1770 / EBU R128
     public var crestDb: Double?
     public var clipEvents: Int?
     public var clipPct: Double?
@@ -111,11 +112,38 @@ func percentile(_ v: [Double], _ q: Double) -> Double {  // numpy 'linear'
 
 struct Stats {
     var peakDb = 0.0, rmsDb = 0.0, crestDb = 0.0, clipEvents = 0, clipPct = 0.0, correlation = 1.0
-    var widthPct = 0.0, balanceDb = 0.0, dr: Double?, noiseFloorDb = -140.0
+    var widthPct = 0.0, balanceDb = 0.0, dr: Double?, noiseFloorDb = -140.0, lufs: Double?
+}
+
+/// BS.1770 K-weighting (pre-filter shelf + RLB high-pass) as one 2-section biquad, for any sample rate.
+/// Analog-matched parameters from libebur128, so results track ffmpeg's ebur128.
+func kWeighting(_ sr: Int) -> vDSP.Biquad<Double> {
+    var c: [Double] = []
+    var K = tan(Double.pi * 1681.974450955533 / Double(sr)), Q = 0.7071752369554196
+    let vh = pow(10, 3.999843853973347 / 20), vb = pow(vh, 0.4996667741545416)
+    var a0 = 1 + K / Q + K * K
+    c += [(vh + vb * K / Q + K * K) / a0, 2 * (K * K - vh) / a0, (vh - vb * K / Q + K * K) / a0,
+          2 * (K * K - 1) / a0, (1 - K / Q + K * K) / a0]
+    K = tan(Double.pi * 38.13547087602444 / Double(sr)); Q = 0.5003270373238773
+    a0 = 1 + K / Q + K * K
+    c += [1, -2, 1, 2 * (K * K - 1) / a0, (1 - K / Q + K * K) / a0]
+    return vDSP.Biquad(coefficients: c, channelCount: 1, sectionCount: 2, ofType: Double.self)!
+}
+
+/// Gated integrated loudness from mean-square (L²+R²) per 100 ms segment. nil = all gated out.
+func integratedLufs(_ seg: [Double]) -> Double? {
+    guard seg.count >= 4 else { return nil }
+    let z = (0 ... seg.count - 4).map { (seg[$0] + seg[$0 + 1] + seg[$0 + 2] + seg[$0 + 3]) / 4 }  // 400 ms, 75% overlap
+    let lk = { (z: Double) in -0.691 + 10 * log10(max(z, 1e-20)) }
+    let ga = z.filter { lk($0) > -70 }
+    guard !ga.isEmpty else { return nil }
+    let rel = lk(ga.reduce(0, +) / Double(ga.count)) - 10
+    let g = ga.filter { lk($0) > rel }
+    return g.isEmpty ? nil : lk(g.reduce(0, +) / Double(g.count))
 }
 
 /// One streaming pass over the full track (stereo). Returns (average power spectrum, stats), nil if too short/silent.
-func measure(_ url: URL, _ sr: Int) throws -> ([Double], Stats)? {
+func measure(_ url: URL, _ sr: Int, mono: Bool = false) throws -> ([Double], Stats)? {
     let block = 3 * sr  // DR blocks
     let fft = RealFFT(NFFT)
     var power = [Double](repeating: 0, count: NFFT / 2 + 1), frames = 0
@@ -124,6 +152,9 @@ func measure(_ url: URL, _ sr: Int) throws -> ([Double], Stats)? {
     var clips: [(peak: Double, events: Int, samples: Int)] = []
     let w = max(sr / 20, 1)  // noise floor: 50 ms window RMS
     var m = [Double](repeating: 0, count: block + NFFT), carry = 0  // carry: mid samples not yet in an FFT frame
+    // ponytail: 100 ms loudness segments on a grid from the file start (BS.1770 block alignment)
+    var kL = kWeighting(sr), kR = kWeighting(sr), seg: [Double] = [], segAcc = 0.0, segN = 0
+    let q = max(sr / 10, 1)
 
     // One chunk = one DR block: per-chunk sums double as block stats, and ~1 MB/channel stays in L2 across passes.
     try decode(url, chunk: block) { l, r in
@@ -139,6 +170,15 @@ func measure(_ url: URL, _ sr: Int) throws -> ([Double], Stats)? {
         }
         sL += vDSP.sumOfSquares(l[len / w * w ..< len]); sR += vDSP.sumOfSquares(r[len / w * w ..< len])
         ssL += sL; ssR += sR
+        // loudness: K-weighted L²+R², averaged per 100 ms segment (mono decodes duplicated: count it once)
+        let kl = kL.apply(input: l), kr = kR.apply(input: r)
+        let sq = mono ? vDSP.square(kl) : vDSP.add(vDSP.square(kl), vDSP.square(kr))
+        var i = 0
+        while i < len {
+            let take = min(q - segN, len - i)
+            segAcc += vDSP.sum(sq[i ..< i + take]); segN += take; i += take
+            if segN == q { seg.append(segAcc / Double(q)); segAcc = 0; segN = 0 }
+        }
         // spectrum of the mid (mono) signal
         m.withUnsafeMutableBufferPointer { mp in
             vDSP_vasmD(l, 1, r, 1, [0.5], mp.baseAddress! + carry, 1, vDSP_Length(len))  // (l + r) * 0.5
@@ -199,6 +239,7 @@ func measure(_ url: URL, _ sr: Int) throws -> ([Double], Stats)? {
     let wr = winRms.filter { $0 > 1e-7 }  // ignore digital silence (lead-in/out)
     // ponytail: noise floor = 1st percentile of 50 ms window RMS; true floor needs gap/fade detection
     if !wr.isEmpty { st.noiseFloorDb = db(pow(percentile(wr, 1), 2)) }
+    st.lufs = integratedLufs(seg)
     return (power.map { $0 / Double(max(frames, 1)) }, st)
 }
 
@@ -327,7 +368,7 @@ public func analyze(_ url: URL) throws -> TrackResult {
     r.codec = info.codec; r.lossless = info.lossless; r.claimedKbps = info.claimedKbps
     r.sampleRate = info.sampleRate; r.bitDepth = info.bitDepth; r.channels = info.channels; r.duration = info.duration
     r.cutoffHz = 0
-    guard let (p, st) = try measure(url, info.sampleRate) else { return r }
+    guard let (p, st) = try measure(url, info.sampleRate, mono: info.channels == 1) else { return r }
     let d = toDb(p)
     let (cutoff, drop, shelf) = findCutoff(d, info.sampleRate)
     let padded = try info.lossless && info.bitDepth == 24 && isPadded(url, info.sampleRate, start: info.duration / 2, dur: 10)
@@ -338,7 +379,7 @@ public func analyze(_ url: URL) throws -> TrackResult {
     r.cutoffHz = cutoff; r.wallDb = drop; r.rolloffHz = rolloff; r.bands = bands
     r.peakDb = st.peakDb; r.rmsDb = st.rmsDb; r.crestDb = st.crestDb; r.clipEvents = st.clipEvents; r.clipPct = st.clipPct
     r.correlation = st.correlation; r.widthPct = st.widthPct; r.balanceDb = st.balanceDb; r.dr = st.dr
-    r.noiseFloorDb = st.noiseFloorDb
+    r.noiseFloorDb = st.noiseFloorDb; r.lufs = st.lufs
     return r
 }
 

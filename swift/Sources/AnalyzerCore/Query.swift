@@ -24,7 +24,7 @@ nonisolated(unsafe) public let FIELDS: [String: (TrackResult) -> FieldValue?] = 
     return [
         "kbps": { i($0.claimedKbps) }, "est": { i(estKbps($0)) }, "conf": { i($0.confidence) },
         "lossy": { r in r.lossless.map { .num($0 ? 0 : 1) } },
-        "dr": { n($0.dr) }, "peak": { n($0.peakDb) }, "rms": { n($0.rmsDb) }, "crest": { n($0.crestDb) },
+        "dr": { n($0.dr) }, "peak": { n($0.peakDb) }, "rms": { n($0.rmsDb) }, "lufs": { n($0.lufs) }, "crest": { n($0.crestDb) },
         "clips": { i($0.clipEvents) }, "clippct": { n($0.clipPct) }, "floor": { n($0.noiseFloorDb) },
         "corr": { n($0.correlation) }, "width": { n($0.widthPct) }, "balance": { n($0.balanceDb.map(abs)) },
         "bits": { i($0.bitDepth) }, "dur": { n($0.duration) }, "air": { n($0.bands?["Air"]) },
@@ -124,6 +124,7 @@ public func sortTracks(_ rs: [TrackResult], by key: String, ascending: Bool) -> 
     case "dr": return by { $0.dr ?? -1 }
     case "peak": return by { $0.peakDb ?? -999 }
     case "rms": return by { $0.rmsDb ?? -999 }
+    case "lufs": return by { $0.lufs ?? -999 }
     case "clips": return by { $0.clipEvents ?? -1 }
     case "added": return by { $0.added ?? .distantPast }
     default: return by { $0.path.lowercased() }
@@ -133,24 +134,25 @@ public func sortTracks(_ rs: [TrackResult], by key: String, ascending: Bool) -> 
 // range filters shown in the Filters sidebar: (field, label, decimals)
 public let RANGES: [(field: String, label: String, decimals: Int)] = [
     ("kbps", "Bitrate (claimed) kbps", 0), ("est", "Est. source kbps", 0), ("conf", "Confidence %", 0),
-    ("peak", "Peak dBFS", 1), ("rms", "RMS dBFS", 1), ("dr", "Dynamic range (DR)", 1), ("crest", "Crest dB", 1),
+    ("peak", "Peak dBFS", 1), ("rms", "RMS dBFS", 1), ("lufs", "Loudness LUFS", 1), ("dr", "Dynamic range (DR)", 1), ("crest", "Crest dB", 1),
     ("clips", "Clip events", 0), ("clippct", "Clipped samples %", 3), ("floor", "Noise floor dBFS", 1),
     ("corr", "Stereo correlation", 3), ("width", "Width (side) %", 1), ("balance", "L/R imbalance dB", 1),
     ("cutoff", "Cutoff kHz", 1), ("rolloff", "85% rolloff kHz", 2), ("air", "Air (>16 kHz) %", 2),
     ("sr", "Sample rate kHz", 1), ("bits", "Bit depth", 0), ("dur", "Duration s", 0)]
 
 // preset -> {field: (min, max)}, nil = open end; "lossy" ticks "Lossy files only"
+// ponytail: "Quiet" at -14 LUFS: club masters sit around -6 to -10; tune on your library
 public let PRESETS: [(name: String, ranges: [String: (Double?, Double?)], lossy: Bool)] = [
     ("Low bitrate source", ["est": (nil, 255)], false), ("Lossy format", [:], true),
     ("Brickwalled", ["dr": (nil, 5.9)], false), ("Clipping", ["clips": (11, nil)], false),
     ("Hot / overcompressed", ["peak": (-0.3, nil), "rms": (-9, nil)], false), ("Noisy / hiss", ["floor": (-60, nil)], false),
     ("Mono / fake stereo", ["corr": (0.995, nil)], false), ("Phase problems", ["corr": (nil, 0)], false),
-    ("Channel imbalance", ["balance": (1.5, nil)], false), ("Short / preview clip", ["dur": (nil, 90)], false),
+    ("Channel imbalance", ["balance": (1.5, nil)], false), ("Short / preview clip", ["dur": (nil, 90)], false), ("Quiet", ["lufs": (nil, -14)], false),
     ("Dull / no air", ["air": (nil, 0.5), "cutoff": (nil, 17)], false), ("Below CD sample rate", ["sr": (nil, 44)], false)]
 
 public let QUERY_HELP = """
     Words search the path. Conditions (AND-ed): field op value, ops < <= > >= = !=
-    Numbers: kbps est conf lossy dr peak rms crest clips clippct floor corr width balance bits dur(s) air(%) cutoff rolloff sr(kHz)
+    Numbers: kbps est conf lossy dr peak rms lufs crest clips clippct floor corr width balance bits dur(s) air(%) cutoff rolloff sr(kHz)
     Text (= means contains): codec verdict fmt
     e.g.  est<256 dr<7 techno
     """
