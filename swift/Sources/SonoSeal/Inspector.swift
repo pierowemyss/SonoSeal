@@ -162,7 +162,8 @@ struct SpectrumChart: View {
                         .annotation(position: .top, alignment: .leading) { Text("85% rolloff").font(.caption2).foregroundStyle(.gray) }
                 }
             }
-            .chartXScale(domain: 0 ... nyq)
+            .chartXScale(domain: 0 ... max(nyq, 24))  // same axis for 44.1k and 48k files
+            .chartXAxis { AxisMarks(values: .stride(by: 5)) }
             .chartYScale(domain: -130 ... 0)
             .chartXAxisLabel("kHz")
             .chartYAxisLabel("dB")
