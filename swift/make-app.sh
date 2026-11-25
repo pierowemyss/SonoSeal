@@ -31,5 +31,7 @@ cat > $APP/Contents/Info.plist <<PLIST
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
-codesign --force --sign - $APP
+# Hardened Runtime: blocks dylib injection (DYLD_INSERT_LIBRARIES) and debugger attach, so other processes can't
+# borrow folder permissions the user granted SonoSeal. Needs no entitlements: the app only loads Apple's libraries.
+codesign --force --options runtime --sign - $APP
 echo "Built $PWD/$APP"
